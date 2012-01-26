@@ -1,0 +1,83 @@
+This is a Python library providing a schema and API suitable for storing time series of floating point numbers in Cassandra. It uses the Pycassa Cassandra client. It is intended for use cases in which there are an extremely large number of times associated with a single item, and in which range scans ("give me all values for this item in January and Febuary") are common. It does not yet have unit tests and has not yet been thoroughly tested or used in production, and so must be considered alpha software.
+
+The schema is as follows:
+
+There are two kinds of things stored in the database; values and "interval observations". First, the values. The values are floating point numbers (PyCassa Doubles). Each value is associated with a particular item, field, time, and rollup duration (a rollup duration of 0 denotes instantaneous values). 
+
+So, for example, one might say, what was Bob's height at 2 pm? Bob is the item, height is the field, 2pm is the time, and 0 is the rollup duration. 
+
+Or one might say, how many hits did the website example.com get between 11pm and noon? example.com is the item, hits is the field, 11pm is the time, and 1 hour is the rollup duration. Note that the rollup computation and semantics are up to you; cassandra-timeseries does not know or care if a rollup of one hour for field "account_value" means the average account value over that hour, or the sum of all of the account values posted in that hour, and it does not compute these aggregates for you; if you don't specifically update the aggregates, they won't be updated. Similarly, whether the 'time' of a rollup interval denotes the start time or the end time is up to you.
+
+== Example usage ==
+
+# note that the Cassandra cluster's partitioner must be ByteOrderedPartitioner. 
+# Note that you cannot change partitioners on an existing cluster without wiping all data! 
+# To change the partitioner, edit conf/cassandra.yaml, and change the line
+# 
+# partitioner: org.apache.cassandra.dht.RandomPartitioner
+#   to
+# partitioner: org.apache.cassandra.dht.ByteOrderedPartitioner
+#
+# note that this use of the ByteOrderedPartitioner can require some manual balancing of key-node assignments, 
+# because some items will likely be accessed more often than others, so Cassandra's default (i think) 
+# of assigning an equal number of items to each node won't be optimal. If you don't have extremely many times to store,
+# or if you don't need to do range scans, then consider using another library/method that stores times as different Cassandra columns
+# rather than different Cassandra rows.
+
+
+c = CassandraTimeSeries('keyspaceName');
+
+c.init_durations_and_fields(durations=[timedelta(2)], fields=['fieldname'])
+
+
+c.append('itemname', 'fieldname', timedelta(2), 55.0, time = datetime(2012,1,6))
+# the duration of the rollup interval is 2 days, the time is 2012/1/6, the value at that time is 55.0.
+
+c.selectTimeInterval('itemname','fieldname',timedelta(2),datetime(2012,1,6), datetime(2012,1,8))
+
+c.closestEntryInTime('itemname','fieldname',timedelta(2),datetime(2012,1,6,20))
+
+c.get('itemname', 'fieldname', datetime(2012,1,6), timedelta(2), default=3)
+
+c.multiget('itemname', 'fieldname', 'datetime(2012,1,6), datetime(2012,1,7)', timedelta(2))
+
+
+=== Interval observations ===
+In some cases the Cassandra database is not the "ground truth" but rather is storing observations about the state of something external. In this case, one would sometimes like to distinguish between 'there are no points in the database from yesterday because nothing happened yesterday' and 'there are no points in the database from yesterday because we weren't observing yesterday; something may or may not have happened then'. For this purpose, for any (item, field, duration) cassandra-timeseries allows you to store time intervals, called "interval observations", intended to represent the times you have observed the external object. cassandra-timeseries provides queries on the interval observations such as "latest_unobserved_time_within_interval" and "latest_unobserved_time_within_interval" for the purpose of determining "what you are missing" within any given interval. These are useful if you want to query some external data source for only those time intervals that you are missing.
+
+The connection between observations and observation intervals isn't enforced, and you can actually use the intervals to represent whatever you want, even if it has nothing to do with the values stored in the rest of the database.
+
+== Example usage of Interval observations ==
+
+c.append_interval_observation('itemname','fieldname',timedelta(2),datetime(2012,1,3), datetime(2012,1,5))
+c.append_interval_observation('itemname','fieldname',timedelta(2),datetime(2012,1,5), datetime(2012,1,8), confidence=1.1)
+c.append_interval_observation('itemname','fieldname2',timedelta(2),datetime(2012,1,5), datetime(2012,1,8))
+c.append_interval_observation('itemname','fieldname2',timedelta(2),datetime(2012,1,7), datetime(2012,1,9))
+
+
+list(c.overlapping_intervals('itemname', 'fieldname', timedelta(2), datetime(2012,1,4), datetime(2012,1,6)))
+
+c.earliest_interval_observation_overlapping_interval('itemname', 'fieldname', timedelta(2), datetime(2012,1,4), datetime(2012,1,6))
+
+c.latest_interval_observation_overlapping_interval('itemname', 'fieldname', timedelta(2), datetime(2012,1,4), datetime(2012,1,6))Out[127]: 
+
+
+c.earliest_unobserved_time_within_interval('itemname', 'fieldname', timedelta(2), datetime(2012,1,5), datetime(2012,1,10))
+
+c.unobserved_interval_hull_within_interval('itemname', 'fieldname', timedelta(2), datetime(2012,1,5), datetime(2012,1,10))
+
+
+
+
+== Internal details ==
+Each "duration" (rollup interval) is stored as its own columnFamily in Cassandra. The string representations of the durations must be distinct (i think they always are with timedeltas but i'm not 100% certain).
+
+The keys are composite keys with the item followed by a time, where the time is represented by an integer denoting the time using numpy's datetime64 convention. This means that data will be primarily sharded by item, not time (assuming you have more items than nodes, this prevents a "hotspot" situation where all writes concerning recent times from all item go to the same node). 
+
+Why do we put the time in the key, instead of as columns? Because we want to accomodate the case where there are a very large number of times associated with some or all items (e.g. if you are storing sensor data that updates hundreds of times per second). Cassandra can store millions of columns per row but you don't want your rows to get too large, so if you store different times as columns and you have a zillion columns you'll have to shard (see http://rubyscale.com/blog/2011/03/06/basic-time-series-with-cassandra/ ). I know little or nothing about Cassandra or databases, though, so my thinking here may be wrong.
+
+The fields are different columns.
+
+
+== Possible future functionality ==
+* most recent value: cassandra-timeseries would allow you to query, 'what's the most recent value you've seen for this (item,field)?'
