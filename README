@@ -34,7 +34,7 @@ c.init_durations_and_fields(durations=[timedelta(2)], fields=['fieldname'])
 c.append('itemname', 'fieldname', timedelta(2), 55.0, time = datetime(2012,1,6))
 # the duration of the rollup interval is 2 days, the time is 2012/1/6, the value at that time is 55.0.
 
-list(c.selectTimeInterval('itemname','fieldname',timedelta(2),datetime(2012,1,6), datetime(2012,1,8)))
+list(c.selectTimeInterval('itemname',['fieldname'],timedelta(2),datetime(2012,1,6), datetime(2012,1,8)))
 
 c.closestEntryInTime('itemname','fieldname',timedelta(2),datetime(2012,1,6,20))
 
@@ -42,6 +42,8 @@ c.get('itemname', 'fieldname', datetime(2012,1,6), timedelta(2), default=3)
 
 c.multiget('itemname', 'fieldname', 'datetime(2012,1,6), datetime(2012,1,7)', timedelta(2))
 # raises a KeyError
+
+Note that you are not allowed to name a field 'time'.
 
 === Interval observations ===
 In some cases the Cassandra database is not the "ground truth" but rather is storing observations about the state of something external. In this case, one would sometimes like to distinguish between 'there are no points in the database from yesterday because nothing happened yesterday' and 'there are no points in the database from yesterday because we weren't observing yesterday; something may or may not have happened then'. For this purpose, for any (item, field, duration) cassandra-timeseries allows you to store time intervals, called "interval observations", intended to represent the times you have observed the external object. cassandra-timeseries provides queries on the interval observations such as "latest_unobserved_time_within_interval" and "latest_unobserved_time_within_interval" for the purpose of determining "what you are missing" within any given interval. These are useful if you want to query some external data source for only those time intervals that you are missing.
