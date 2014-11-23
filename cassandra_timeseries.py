@@ -78,7 +78,7 @@ class CassandraTimeSeries(object):
             if keyspace not in keyspaces:
                 if shouldLog:
                     logging.debug('Creating Cassandra keyspace %s' % keyspace)
-                systemManager.create_keyspace(keyspace, strategy_options={"replication_factor": "1", "partitioner": "org.apache.cassandra.dht.ByteOrderedPartitioner"})
+                systemManager.create_keyspace(keyspace, strategy_options={"replication_factor": "1"})
             #self._pool = ConnectionPool(keyspace, pool_size=256, pool_timeout=12000, timeout=6000, max_overflow=256) # todo lower crazy timeout
             logging.debug('Connected to Cassandra keyspace %s' % keyspace)
             self._pool = ConnectionPool(keyspace, pool_size=5, pool_timeout=450, timeout=300, max_overflow=5, max_retries=5) # todo lower crazy timeout
