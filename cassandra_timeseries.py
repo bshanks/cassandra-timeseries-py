@@ -1,7 +1,8 @@
 import logging
 import sys
 from threading import Lock
-from datetime import datetime, timedelta
+from datetime import timedelta
+from datetime import datetime as dtm
 
 from decorator import decorator
 from numpy import datetime64
@@ -202,11 +203,13 @@ class CassandraTimeSeries(object):
         finish.append(False)  # still doesn't exclude the endpoint for some reason, so do it manually
         finish = tuple(finish)
         #print finish
+        #print (start, finish, fields)
         results = cf.get_range(start=start, finish=finish, columns=fields)
         results = [result for result in results if result[0][1] <  datetime64(endTime).astype(int)]
+        #print results
         return (dict(time=datetime64(x[0][1]).astype(object), **x[1]) for x in results)
 
-    def append(self, item, field, duration, value, time = datetime.utcnow(), **kw):
+    def append(self, item, field, duration, value, time = dtm.utcnow(), **kw):
         #print 'trying to append'
         cf = self._getColumnFamily(duration, 'main')
         cf.insert(self._makeKey(item, time), {field : value})
@@ -353,6 +356,7 @@ class CassandraTimeSeries(object):
 
 
     def lastEntryInTimeInterval(self, item, field, duration, beginTime, endTime):
+        #print (item, [field], duration, beginTime, endTime)
         rows = list(self.selectTimeInterval(item, [field], duration, beginTime, endTime))
         if not len(rows):
             return None
@@ -363,6 +367,7 @@ class CassandraTimeSeries(object):
             
 
     def firstEntryInTimeInterval(self, item, field, duration, beginTime, endTime):
+        #print (item, [field], duration, beginTime, endTime)
         rows = list(self.selectTimeInterval(item, [field], duration, beginTime, endTime))
         if not len(rows):
             return None
