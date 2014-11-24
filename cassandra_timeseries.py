@@ -135,11 +135,23 @@ class CassandraTimeSeries(object):
                 allColumnFamilyOptions = {'default_validation_class' : DoubleType(), 'key_cache_size': 200000, 'row_cache_size': 20000}
                 allColumnFamilyOptions.update(columnFamilyOptions)
 
+            main_column_validation_classes = {'item': UTF8Type(), 
+                                              'time': LongType(),
+                                              'loc': UTF8Type(), 
+                                              'status': UTF8Type(), 
+                                              'external_id_domain': UTF8Type(), 
+                                              'external_id': UTF8Type(), 
+                                              'source': UTF8Type(),
+                                              'who': UTF8Type(),
+                                              'comment': UTF8Type()}
 
             if not columnFamilyName in columnFamilies:
                 if self._shouldLog:
                     logging.debug('Creating Cassandra column family %s' % columnFamilyName)
                 systemManager.create_column_family(self._keyspace, columnFamilyName, key_validation_class=itemTimeCompositeType, **allColumnFamilyOptions)
+
+                systemManager.alter_column_family(self._keyspace, columnFamilyName, column_validation_classes=main_column_validation_classes)
+
 
                 self._createColumnFamily_interval_observations_or_manual_index(systemManager, columnFamilies, self._columnFamilyName(duration, 'interval_observations'), itemRevTimeTimeCompositeType, fields, alter_existing_columns=alter_existing_columns)
                 self._createColumnFamily_interval_observations_or_manual_index(systemManager, columnFamilies, self._columnFamilyName(duration, 'begin_time_manual_index'), itemRevTimeCompositeType, fields, alter_existing_columns=alter_existing_columns)
@@ -209,11 +221,22 @@ class CassandraTimeSeries(object):
         #print results
         return (dict(time=datetime64(x[0][1]).astype(object), **x[1]) for x in results)
 
+    # maybe this should be called 'insert'
     def append(self, item, field, duration, value, time = dtm.utcnow(), **kw):
         #print 'trying to append'
         cf = self._getColumnFamily(duration, 'main')
         cf.insert(self._makeKey(item, time), {field : value})
 
+    def appendRow(self, item, duration, row, time = dtm.utcnow()):
+        """
+        note: mutates 'row'
+        """
+        #print 'trying to append'
+        cf = self._getColumnFamily(duration, 'main')
+        row['item'] = unicode(item)
+        row['time'] = datetime64(time).astype(int)
+        #print item, duration, time, row, self._makeKey(item, time)
+        cf.insert(self._makeKey(item, time), row)
 
     def append_interval_observation(self, item, field, duration, begin_time, end_time, status='', source='', confidence=0.0, comment='', **kw):
         #print 'appending %s %s %s %s %s' % (item, field, duration, begin_time, end_time)
