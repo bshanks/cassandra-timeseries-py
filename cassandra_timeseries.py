@@ -5,7 +5,7 @@ from datetime import timedelta
 from datetime import datetime as dtm
 
 from decorator import decorator
-from numpy import datetime64
+from numpy import datetime64, timedelta64
 import pycassa
 from pycassa.types import CompositeType, UTF8Type, LongType, DoubleType, BooleanType
 from pycassa.pool import ConnectionPool
@@ -15,8 +15,7 @@ from pycassa import NotFoundException
 from numpy import argmax, isnan
 import re
 from itertools import ifilter
-
-
+import numpy
 
 
 # numpy.argmin broken on dates: http://projects.scipy.org/numpy/ticket/1149
@@ -38,7 +37,17 @@ def argmin(listable):
     return current_min_loc
 
 
-# a.selectTimeInterval('i','f','d',datetime.datetime.utcnow() - datetime.timedelta(60), ,datetime.datetime.utcnow())
+def datetime2int(dt):
+    # represents a datetime as microseconds since the epoch (i think this may assume UTC if the datetime doesn't specify?)
+    return (datetime64(dt) - datetime64(0, 'us')).astype(int)
+
+def int2datetime(i):
+    # thanks http://stackoverflow.com/questions/13703720/converting-between-datetime-timestamp-and-datetime64
+    dt64 = datetime64(i, 'us')
+    ts = (dt64 - datetime64('1970-01-01T00:00:00Z')) / timedelta64(1, 's')
+    return dtm.utcfromtimestamp(ts)
+
+# a.selectTimeInterval('i','f','d',dtm.utcnow() - datetime.timedelta(60), ,dtm.utcnow())
 
 # note: using half-open intervals [begin, end)
 
@@ -117,59 +126,78 @@ class CassandraTimeSeries(object):
                 logging.debug('Setting column validators in Cassandra column family %s' % columnFamilyName)
 
             systemManager.alter_column_family(self._keyspace, columnFamilyName, column_validation_classes=interval_observation_field_column_validators)
-        
+            systemManager.create_index(self._keyspace, columnFamilyName, 'begin_time', LongType())
+            systemManager.create_index(self._keyspace, columnFamilyName, 'end_time', LongType())
+            systemManager.create_index(self._keyspace, columnFamilyName, 'status_time', UTF8Type())
+            systemManager.create_index(self._keyspace, columnFamilyName, 'comment', UTF8Type())
 
-    def init_durations_and_fields(self, durations=[timedelta(0)], fields=[], columnFamilyOptions={}, alter_existing_columns=False):
+    def init_durations_and_fields(self, durations=[timedelta(0)], fields=[], columnFamilyOptions={}, alter_existing_columns=False, table_types=['main']):
         #print "*** INIT STARTED: %s %s" % (durations, fields)
 
         systemManager = pycassa.system_manager.SystemManager(timeout=600) # todo lower crazy timeout
         columnFamilies = systemManager.get_keyspace_column_families(self._keyspace)
 
         for duration in durations:
-            columnFamilyName = self._columnFamilyName(duration, 'main')
+            for table_type in table_types:
+                columnFamilyName = self._columnFamilyName(duration, table_type)
 
-            if duration == timedelta(0):
-                allColumnFamilyOptions = {'default_validation_class' : DoubleType(), 'key_cache_size': 2000, 'row_cache_size': 200}
-                allColumnFamilyOptions.update(columnFamilyOptions)
-            else:
-                allColumnFamilyOptions = {'default_validation_class' : DoubleType(), 'key_cache_size': 200000, 'row_cache_size': 20000}
-                allColumnFamilyOptions.update(columnFamilyOptions)
+                if duration == timedelta(0):
+                    allColumnFamilyOptions = {'default_validation_class' : DoubleType(), 'key_cache_size': 2000, 'row_cache_size': 200}
+                    allColumnFamilyOptions.update(columnFamilyOptions)
+                else:
+                    allColumnFamilyOptions = {'default_validation_class' : DoubleType(), 'key_cache_size': 200000, 'row_cache_size': 20000}
+                    allColumnFamilyOptions.update(columnFamilyOptions)
 
-            main_column_validation_classes = {'item': UTF8Type(), 
-                                              'time': LongType(),
-                                              'loc': UTF8Type(), 
-                                              'status': UTF8Type(), 
-                                              'external_id_domain': UTF8Type(), 
-                                              'external_id': UTF8Type(), 
-                                              'source': UTF8Type(),
-                                              'who': UTF8Type(),
-                                              'comment': UTF8Type()}
+                main_column_validation_classes = {'item': UTF8Type(), 
+                                                  'time': LongType(),
+                                                  'loc': UTF8Type(), 
+                                                  'status': UTF8Type(), 
+                                                  'external_id_domain': UTF8Type(), 
+                                                  'external_id': UTF8Type(), 
+                                                  'source': UTF8Type(),
+                                                  'who': UTF8Type(),
+                                                  'comment': UTF8Type()}
 
-            if not columnFamilyName in columnFamilies:
-                if self._shouldLog:
-                    logging.debug('Creating Cassandra column family %s' % columnFamilyName)
-                systemManager.create_column_family(self._keyspace, columnFamilyName, key_validation_class=itemTimeCompositeType, **allColumnFamilyOptions)
+                if not columnFamilyName in columnFamilies:
+                    if self._shouldLog:
+                        logging.debug('Creating Cassandra column family %s' % columnFamilyName)
+                    systemManager.create_column_family(self._keyspace, columnFamilyName, key_validation_class=itemTimeCompositeType, **allColumnFamilyOptions)
 
-                systemManager.alter_column_family(self._keyspace, columnFamilyName, column_validation_classes=main_column_validation_classes)
+                    systemManager.alter_column_family(self._keyspace, columnFamilyName, column_validation_classes=main_column_validation_classes)
+                    systemManager.create_index(self._keyspace, columnFamilyName, 'item', UTF8Type())
+                    systemManager.create_index(self._keyspace, columnFamilyName, 'time', LongType())
+                    systemManager.create_index(self._keyspace, columnFamilyName, 'loc', UTF8Type())
+                    systemManager.create_index(self._keyspace, columnFamilyName, 'status', UTF8Type())
+                    systemManager.create_index(self._keyspace, columnFamilyName, 'external_id_domain', UTF8Type())
+                    systemManager.create_index(self._keyspace, columnFamilyName, 'external_id', UTF8Type())
+                    systemManager.create_index(self._keyspace, columnFamilyName, 'who', UTF8Type())
+                    systemManager.create_index(self._keyspace, columnFamilyName, 'comment', UTF8Type())
+
+                    self._createColumnFamily_interval_observations_or_manual_index(systemManager, columnFamilies, self._columnFamilyName(duration, table_type + '_interval_observations'), itemRevTimeTimeCompositeType, fields, alter_existing_columns=alter_existing_columns)
+                    self._createColumnFamily_interval_observations_or_manual_index(systemManager, columnFamilies, self._columnFamilyName(duration, table_type + '_begin_time_manual_index'), itemRevTimeCompositeType, fields, alter_existing_columns=alter_existing_columns)
+                    self._createColumnFamily_interval_observations_or_manual_index(systemManager, columnFamilies, self._columnFamilyName(duration, table_type + '_end_time_manual_index'), itemTimeCompositeType, fields, alter_existing_columns=alter_existing_columns)
 
 
-                self._createColumnFamily_interval_observations_or_manual_index(systemManager, columnFamilies, self._columnFamilyName(duration, 'interval_observations'), itemRevTimeTimeCompositeType, fields, alter_existing_columns=alter_existing_columns)
-                self._createColumnFamily_interval_observations_or_manual_index(systemManager, columnFamilies, self._columnFamilyName(duration, 'begin_time_manual_index'), itemRevTimeCompositeType, fields, alter_existing_columns=alter_existing_columns)
-                self._createColumnFamily_interval_observations_or_manual_index(systemManager, columnFamilies, self._columnFamilyName(duration, 'end_time_manual_index'), itemTimeCompositeType, fields, alter_existing_columns=alter_existing_columns)
+
 
         #print "*** INIT FINISHED: %s %s" % (durations, fields)
 
+        
 
             
     
     @staticmethod
     def _makeKey(item, time):
-        return (unicode(item), datetime64(time).astype(int))
+        return (unicode(item), datetime2int(time))
+
+        
+
+
 
 
     @staticmethod
     def _makeIntervalKey(item, beginTime, endTime):
-        return (unicode(item), datetime64(beginTime).astype(int), datetime64(endTime).astype(int))
+        return (unicode(item), datetime2int(beginTime), datetime2int(endTime))
 
     # todo make __getitem__ with key as a tuple
     def get_nodefault(self, item, field, time, duration):
@@ -204,12 +232,13 @@ class CassandraTimeSeries(object):
             else:
                 return [resultDict.get(key, {}).get(field, default) for key in keys]
         except KeyError:
-            raise KeyError('CassandraTimeSeries.multiget: no entry exists for item %s at time %s' % (item, datetime64(key[1]).astype(object)))
+            raise KeyError('CassandraTimeSeries.multiget: no entry exists for item %s at time %s' % (item, int2datetime(key[1])))
                 
 
     # todo: does not coerce return dates back to datetime; must change dependencies if u change this
-    def selectTimeInterval(self, item, fields, duration, beginTime, endTime, **kw):
-        cf = self._getColumnFamily(duration, 'main')
+    # todo: 'fields' is ignored
+    def selectTimeInterval(self, item, fields, duration, beginTime, endTime, table_type='main', **kw):
+        cf = self._getColumnFamily(duration, table_type)
         start = self._makeKey(item, beginTime)
         finish = list(self._makeKey(item, endTime))
         finish.append(False)  # still doesn't exclude the endpoint for some reason, so do it manually
@@ -217,34 +246,37 @@ class CassandraTimeSeries(object):
         #print finish
         #print (start, finish, fields)
         results = cf.get_range(start=start, finish=finish, columns=fields)
-        results = [result for result in results if result[0][1] <  datetime64(endTime).astype(int)]
+        results = [result for result in results if result[0][1] <  datetime2int(endTime)]
         #print results
-        return (dict(time=datetime64(x[0][1]).astype(object), **x[1]) for x in results)
+        return (dict(time=int2datetime(x[0][1]), **x[1]) for x in results)
 
-    # maybe this should be called 'insert'
+    # todo this should be called 'insert', not 'append'
     def append(self, item, field, duration, value, time = dtm.utcnow(), **kw):
         #print 'trying to append'
         cf = self._getColumnFamily(duration, 'main')
         cf.insert(self._makeKey(item, time), {field : value})
 
-    def appendRow(self, item, duration, row, time = dtm.utcnow()):
+    # todo this should be called 'insert', not 'append'
+    def appendRow(self, item, duration, table_type, row, time = dtm.utcnow()):
         """
         note: mutates 'row'
         """
         #print 'trying to append'
-        cf = self._getColumnFamily(duration, 'main')
+        cf = self._getColumnFamily(duration, table_type)
         row['item'] = unicode(item)
-        row['time'] = datetime64(time).astype(int)
+        row['time'] = datetime2int(time)
         #print item, duration, time, row, self._makeKey(item, time)
         cf.insert(self._makeKey(item, time), row)
 
+    # todo this should be called 'insert', not 'append'
+    # todo: 'field' is currently unused, but it probably shouldn't be; there should be different 'observed' intervals associated with different fields
     def append_interval_observation(self, item, field, duration, begin_time, end_time, status='', source='', confidence=0.0, comment='', **kw):
         #print 'appending %s %s %s %s %s' % (item, field, duration, begin_time, end_time)
         cf = self._getColumnFamily(duration, 'interval_observations')
         begin_time_manual_index_cf = self._getColumnFamily(duration, 'begin_time_manual_index')
         end_time_manual_index_cf = self._getColumnFamily(duration, 'end_time_manual_index')
 
-        interval_columns = {'begin_time': datetime64(begin_time).astype(int), 'end_time': datetime64(end_time).astype(int), field: True, 'status': status, 'source': source, 'confidence': confidence, 'comment': comment}
+        interval_columns = {'begin_time': datetime2int(begin_time), 'end_time': datetime2int(end_time), field: True, 'status': status, 'source': source, 'confidence': confidence, 'comment': comment}
 
         #print 'append inserting (%s %s)' % (self._makeIntervalKey(item, begin_time, end_time), interval_columns)
         cf.insert(self._makeIntervalKey(item, begin_time, end_time), interval_columns)
@@ -266,15 +298,15 @@ class CassandraTimeSeries(object):
     def overlapping_intervals(self, item, field, duration, begin_time, end_time, confidence_threshold=None, **kw):
             #print 'item, field, duration, begin_time, end_time,  %s %s %s %s %s' % (item, field, duration, begin_time, end_time, )
             cf = self._getColumnFamily(duration, 'interval_observations')
-            begin_time_at_or_before_end_time = cf.get_range(finish=(item,datetime64(end_time).astype(int), False), start=(item,))
+            begin_time_at_or_before_end_time = cf.get_range(finish=(item,datetime2int(end_time), False), start=(item,))
             #print list(begin_time_at_or_before_end_time)
-            begin_time_at_or_before_end_time = cf.get_range(finish=(item,datetime64(end_time).astype(int), False), start=(item,))
+            begin_time_at_or_before_end_time = cf.get_range(finish=(item,datetime2int(end_time), False), start=(item,))
 
 
             def check_interval_entry(interval_entry, confidence_threshold=None):
                 #print interval_entry
                 ((item, interval_begin_time, interval_end_time), columns) = interval_entry
-                if field in columns and columns[field] and interval_end_time > datetime64(begin_time).astype(int):
+                if field in columns and columns[field] and interval_end_time > datetime2int(begin_time):
                     if confidence_threshold is None or ('confidence' in columns and columns['confidence'] >= confidence_threshold):
                         # note: due to lack of isolation in cassandra you may get an entry with some as-yet unfilled columns...
                         #   todo should use begin_time, end_time in keys, not in columns
@@ -300,7 +332,7 @@ class CassandraTimeSeries(object):
                 # note: due to lack of isolation in cassandra you may get an entry with some as-yet unfilled columns...
                 #   todo should use begin_time, end_time in keys, not in columns
             result = observed_rows[argmin(observed_beginTimes)]
-            return {'begin_time' : datetime64(result['begin_time']).astype(object), 'end_time' : datetime64(result['end_time']).astype(object), 'status' : result['status'], 'source' : result['source'], 'confidence' : result['confidence'], 'comment' : result['comment'], }
+            return {'begin_time' : int2datetime(result['begin_time']), 'end_time' : int2datetime(result['end_time']), 'status' : result['status'], 'source' : result['source'], 'confidence' : result['confidence'], 'comment' : result['comment'], }
 
 
     def latest_interval_observation_overlapping_interval(self, item, field, duration, begin_time, end_time, confidence_threshold=None):
@@ -309,7 +341,7 @@ class CassandraTimeSeries(object):
                 return None
             observed_endTimes = [row['end_time'] for row in observed_rows]
             result = observed_rows[argmax(observed_endTimes)]
-            return {'begin_time' : datetime64(result['begin_time']).astype(object), 'end_time' : datetime64(result['end_time']).astype(object), 'status' : result['status'], 'source' : result['source'], 'confidence' : result['confidence'], 'comment' : result['comment'], }
+            return {'begin_time' : int2datetime(result['begin_time']), 'end_time' : int2datetime(result['end_time']), 'status' : result['status'], 'source' : result['source'], 'confidence' : result['confidence'], 'comment' : result['comment'], }
             
     def earliest_unobserved_time_within_interval(self, item, field, duration, begin_time, end_time, confidence_threshold=None):
         time = begin_time
@@ -378,9 +410,9 @@ class CassandraTimeSeries(object):
         return interval
 
 
-    def lastEntryInTimeInterval(self, item, field, duration, beginTime, endTime):
+    def lastEntryInTimeInterval(self, item, field, duration, beginTime, endTime, table_type='main'):
         #print (item, [field], duration, beginTime, endTime)
-        rows = list(self.selectTimeInterval(item, [field], duration, beginTime, endTime))
+        rows = list(self.selectTimeInterval(item, [field], duration, beginTime, endTime, table_type=table_type))
         if not len(rows):
             return None
         times = [row['time'] for row in rows]
@@ -389,9 +421,9 @@ class CassandraTimeSeries(object):
 
             
 
-    def firstEntryInTimeInterval(self, item, field, duration, beginTime, endTime):
+    def firstEntryInTimeInterval(self, item, field, duration, beginTime, endTime, table_type='main'):
         #print (item, [field], duration, beginTime, endTime)
-        rows = list(self.selectTimeInterval(item, [field], duration, beginTime, endTime))
+        rows = list(self.selectTimeInterval(item, [field], duration, beginTime, endTime, table_type=table_type))
         if not len(rows):
             return None
         times = [row['time'] for row in rows]
@@ -401,12 +433,12 @@ class CassandraTimeSeries(object):
 
 
 
-    def closestEntryInTime(self, item, field, duration, time, search_radius_duration=timedelta(3,0)):
+    def closestEntryInTime(self, item, field, duration, time, table_type='main', search_radius_duration=timedelta(3,0)):
         try:
             return {'time' : time, 'value' : self.get_nodefault(item, field, time, duration), }
         except KeyError:
-            lastBefore = self.lastEntryInTimeInterval(item, field, duration, time - search_radius_duration, time)
-            firstAfter = self.firstEntryInTimeInterval(item, field, duration, time, time + search_radius_duration)
+            lastBefore = self.lastEntryInTimeInterval(item, field, duration, time - search_radius_duration, time, table_type=table_type)
+            firstAfter = self.firstEntryInTimeInterval(item, field, duration, time, time + search_radius_duration, table_type=table_type)
             if lastBefore is not None and firstAfter is None:
                 return lastBefore
 
@@ -445,48 +477,48 @@ class CassandraTimeSeries(object):
 # 
 # a.earliest_interval_observation_overlapping_interval('i', 'f', timedelta(2), datetime(2012,1,4), datetime(2012,1,6))
 ## Out[128]: 
-## {'begin_time': datetime.datetime(2012, 1, 3, 0, 0),
+## {'begin_time': dtm(2012, 1, 3, 0, 0),
 ##  'comment': u'',
 ##  'confidence': 0.0,
-##  'end_time': datetime.datetime(2012, 1, 5, 0, 0),
+##  'end_time': dtm(2012, 1, 5, 0, 0),
 ##  'source': u'',
 ##  'status': u''}
 
 ## a.latest_interval_observation_overlapping_interval('i', 'f', timedelta(2), datetime(2012,1,4), datetime(2012,1,6))Out[127]: 
-## {'begin_time': datetime.datetime(2012, 1, 5, 0, 0),
+## {'begin_time': dtm(2012, 1, 5, 0, 0),
 ##  'comment': u'',
 ##  'confidence': 0.0,
-##  'end_time': datetime.datetime(2012, 1, 8, 0, 0),
+##  'end_time': dtm(2012, 1, 8, 0, 0),
 ##  'source': u'',
 ##  'status': u''}
 
 
 # a.earliest_unobserved_time_within_interval('i', 'f', timedelta(2), datetime(2012,1,5), datetime(2012,1,10))
-# Out[123]: datetime.datetime(2012, 1, 8, 0, 0)
+# Out[123]: dtm(2012, 1, 8, 0, 0)
 
 
 # a.earliest_unobserved_time_within_interval('i', 'f', timedelta(2), datetime(2012,1,4), datetime(2012,1,6))
 #   returns None
 
 # a.earliest_unobserved_time_within_interval('i', 'f', timedelta(2), datetime(2012,1,2), datetime(2012,1,6))
-# Out[125]: datetime.datetime(2012, 1, 2, 0, 0)
+# Out[125]: dtm(2012, 1, 2, 0, 0)
 
 # a.latest_unobserved_time_within_interval('i', 'f', timedelta(2), datetime(2012,1,5), datetime(2012,1,10))
-# Out[126]: datetime.datetime(2012, 1, 10, 0, 0)
+# Out[126]: dtm(2012, 1, 10, 0, 0)
 
 
 
 # a.unobserved_interval_hull_within_interval('i', 'f', timedelta(2), datetime(2012,1,5), datetime(2012,1,10))
-#Out[119]: (datetime.datetime(2012, 1, 8, 0, 0), datetime.datetime(2012, 1, 10, 0, 0))
+#Out[119]: (dtm(2012, 1, 8, 0, 0), dtm(2012, 1, 10, 0, 0))
 
 # a.unobserved_interval_hull_within_interval('i', 'f2', timedelta(2), datetime(2012,1,5), datetime(2012,1,10))
-# Out[120]: (datetime.datetime(2012, 1, 9, 0, 0), datetime.datetime(2012, 1, 10, 0, 0))
+# Out[120]: (dtm(2012, 1, 9, 0, 0), dtm(2012, 1, 10, 0, 0))
 
 # a.unobserved_interval_hull_within_interval_over_fields('i',['f2'],timedelta(2),datetime(2012,1,5), datetime(2012,1,10), confidence_threshold=0)
-# Out[121]: (datetime.datetime(2012, 1, 9, 0, 0), datetime.datetime(2012, 1, 10, 0, 0))
+# Out[121]: (dtm(2012, 1, 9, 0, 0), dtm(2012, 1, 10, 0, 0))
 
 # a.unobserved_interval_hull_within_interval_over_fields('i',['f', 'f2'],timedelta(2),datetime(2012,1,5), datetime(2012,1,10), confidence_threshold=0)
-# Out[16]: (datetime.datetime(2012, 1, 8, 0, 0), datetime.datetime(2012, 1, 10, 0, 0))
+# Out[16]: (dtm(2012, 1, 8, 0, 0), dtm(2012, 1, 10, 0, 0))
 # 
 
 
@@ -500,10 +532,10 @@ class CassandraTimeSeries(object):
 #  {'time': 1325894400000000, 'value': 60.0}]
 
 # a.closestEntryInTime('i','f',timedelta(2),datetime(2012,1,6,5))
-# Out[192]: {'time': datetime.datetime(2012, 1, 6, 0, 0), 'value': 55.0}
+# Out[192]: {'time': dtm(2012, 1, 6, 0, 0), 'value': 55.0}
 
 # a.closestEntryInTime('i','f',timedelta(2),datetime(2012,1,6,20))
-# Out[193]: {'time': datetime.datetime(2012, 1, 7, 0, 0), 'value': 60.0}
+# Out[193]: {'time': dtm(2012, 1, 7, 0, 0), 'value': 60.0}
 
 # a.selectTimeInterval('i','f',timedelta(2),datetime(2012,1,6), datetime(2012,1,8))
 # type(a.selectTimeInterval('i','f',timedelta(2),datetime(2012,1,6), datetime(2012,1,8)))

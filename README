@@ -1,5 +1,7 @@
 This is a Python library providing a schema and API suitable for storing time series of floating point numbers in Cassandra. It uses the Pycassa Cassandra client. It is intended for use cases in which there are an extremely large number of times associated with a single item, and in which range scans ("give me all values for this item in January and Febuary") are common. It does not yet have unit tests and has not yet been thoroughly tested or used in production, and so must be considered alpha software.
 
+In order to use range scans, the Cassandra cluster must be using an ordered partitioner. Since the row ordering is by (item, time), this means that there will be 'hot spots' on the cluster nodes that happen to be handling the current time. This means such a setup won't scale very well under a write-heavy load. Which defeats much of the purpose of using Cassandra.
+
 The schema is as follows:
 
 There are two kinds of things stored in the database; values and "interval observations". First, the values. The values are floating point numbers (PyCassa Doubles). Each value is associated with a particular item, field, time, and rollup duration (a rollup duration of 0 denotes instantaneous values). 
@@ -10,7 +12,7 @@ Or one might say, how many hits did the website example.com get between 11pm and
 
 == Example usage ==
 
-# note that the Cassandra cluster's partitioner must be ByteOrderedPartitioner. 
+# note that the Cassandra cluster's partitioner must be ByteOrderedPartitioner (actually maybe OrderPreservingPartitioner would work too). 
 # Note that you cannot change partitioners on an existing cluster without wiping all data! 
 # To change the partitioner, edit conf/cassandra.yaml, and change the line
 # 
