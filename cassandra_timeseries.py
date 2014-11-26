@@ -200,16 +200,17 @@ class CassandraTimeSeries(object):
         return (unicode(item), datetime2int(beginTime), datetime2int(endTime))
 
     # todo make __getitem__ with key as a tuple
-    def get_nodefault(self, item, field, time, duration):
+    def get_nodefault(self, item, fields, time, duration):
                 cf = self._getColumnFamily(duration, 'main')
                 try:
-                    return cf.get(self._makeKey(item, time), columns=[field])[field]
+                    return cf.get(self._makeKey(item, time), columns=fields)
                 except NotFoundException:
                     raise KeyError('CassandraTimeSeries: get_nodefault not found')
 
+    # todo make this return the whole row, like get_nodefault does now
     def get(self, item, field, time, duration, default=None):
         try:
-            return self.get_nodefault(item, field, time, duration)
+            return self.get_nodefault(item, [field], time, duration)[field]
         except KeyError:
             return default
     
@@ -410,9 +411,9 @@ class CassandraTimeSeries(object):
         return interval
 
 
-    def lastEntryInTimeInterval(self, item, field, duration, beginTime, endTime, table_type='main'):
+    def lastEntryInTimeInterval(self, item, fields, duration, beginTime, endTime, table_type='main'):
         #print (item, [field], duration, beginTime, endTime)
-        rows = list(self.selectTimeInterval(item, [field], duration, beginTime, endTime, table_type=table_type))
+        rows = list(self.selectTimeInterval(item, fields, duration, beginTime, endTime, table_type=table_type))
         if not len(rows):
             return None
         times = [row['time'] for row in rows]
@@ -421,9 +422,9 @@ class CassandraTimeSeries(object):
 
             
 
-    def firstEntryInTimeInterval(self, item, field, duration, beginTime, endTime, table_type='main'):
+    def firstEntryInTimeInterval(self, item, fields, duration, beginTime, endTime, table_type='main'):
         #print (item, [field], duration, beginTime, endTime)
-        rows = list(self.selectTimeInterval(item, [field], duration, beginTime, endTime, table_type=table_type))
+        rows = list(self.selectTimeInterval(item, fields, duration, beginTime, endTime, table_type=table_type))
         if not len(rows):
             return None
         times = [row['time'] for row in rows]
@@ -433,12 +434,18 @@ class CassandraTimeSeries(object):
 
 
 
-    def closestEntryInTime(self, item, field, duration, time, table_type='main', search_radius_duration=timedelta(3,0)):
+    def closestEntryInTime(self, item, fields, duration, time, table_type='main', search_radius_duration=timedelta(3,0)):
+        """
+        note: if there is a 'time' column, it may or may not be overwrittenby the time in the key..
+        """
+
         try:
-            return {'time' : time, 'value' : self.get_nodefault(item, field, time, duration), }
+            #return {'time' : time, 'value' : self.get_nodefault(item, fields, time, duration), }
+            return self.get_nodefault(item, fields, time, duration).update({'time' : time})
+            
         except KeyError:
-            lastBefore = self.lastEntryInTimeInterval(item, field, duration, time - search_radius_duration, time, table_type=table_type)
-            firstAfter = self.firstEntryInTimeInterval(item, field, duration, time, time + search_radius_duration, table_type=table_type)
+            lastBefore = self.lastEntryInTimeInterval(item, fields, duration, time - search_radius_duration, time, table_type=table_type)
+            firstAfter = self.firstEntryInTimeInterval(item, fields, duration, time, time + search_radius_duration, table_type=table_type)
             if lastBefore is not None and firstAfter is None:
                 return lastBefore
 
@@ -453,6 +460,9 @@ class CassandraTimeSeries(object):
                 return firstAfter
             else:
                 return lastBefore 
+
+        
+
                 
 
 # from cassandratimeseries import *; from datetime import datetime, timedelta; a=CassandraTimeSeries('test'); a.selectTimeInterval('i','f',timedelta(2),datetime.utcnow() - timedelta(60), datetime.utcnow())
@@ -531,11 +541,11 @@ class CassandraTimeSeries(object):
 # [{'time': 1325808000000000, 'value': 55.0},
 #  {'time': 1325894400000000, 'value': 60.0}]
 
-# a.closestEntryInTime('i','f',timedelta(2),datetime(2012,1,6,5))
-# Out[192]: {'time': dtm(2012, 1, 6, 0, 0), 'value': 55.0}
+# a.closestEntryInTime('i',['f'],timedelta(2),datetime(2012,1,6,5))
+# Out[192]: {'time': dtm(2012, 1, 6, 0, 0), 'f': 55.0}
 
-# a.closestEntryInTime('i','f',timedelta(2),datetime(2012,1,6,20))
-# Out[193]: {'time': dtm(2012, 1, 7, 0, 0), 'value': 60.0}
+# a.closestEntryInTime('i',['f'],timedelta(2),datetime(2012,1,6,20))
+# Out[193]: {'time': dtm(2012, 1, 7, 0, 0), 'f': 60.0}
 
 # a.selectTimeInterval('i','f',timedelta(2),datetime(2012,1,6), datetime(2012,1,8))
 # type(a.selectTimeInterval('i','f',timedelta(2),datetime(2012,1,6), datetime(2012,1,8)))
