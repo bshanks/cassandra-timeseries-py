@@ -17,6 +17,8 @@ import re
 from itertools import ifilter
 import numpy
 
+# only needed for some multiprocess debug info
+import os
 
 # numpy.argmin broken on dates: http://projects.scipy.org/numpy/ticket/1149
 def argmin(listable):
@@ -80,7 +82,8 @@ class CassandraTimeSeries(object):
             self._warn = warn
             self._keyspace = keyspace
             if shouldLog:
-                logging.debug('Attempting to connect to Cassandra keyspace %s' % keyspace)
+                #logging.debug('Attempting to connect to Cassandra keyspace %s' % keyspace)
+                logging.debug('Attempting to connect to Cassandra keyspace %s (process %s)' % (keyspace, os.getpid()))
             systemManager = pycassa.system_manager.SystemManager(timeout=300) # todo lower crazy timeout
         
             keyspaces = systemManager.list_keyspaces()
@@ -90,11 +93,16 @@ class CassandraTimeSeries(object):
                 systemManager.create_keyspace(keyspace, strategy_options={"replication_factor": "1"})
             #self._pool = ConnectionPool(keyspace, pool_size=256, pool_timeout=12000, timeout=6000, max_overflow=256) # todo lower crazy timeout
             logging.debug('Connected to Cassandra keyspace %s' % keyspace)
-            self._pool = ConnectionPool(keyspace, pool_size=5, pool_timeout=450, timeout=300, max_overflow=5, max_retries=5) # todo lower crazy timeout
+            #self._pool = ConnectionPool(keyspace, pool_size=5, pool_timeout=450, timeout=300, max_overflow=5, max_retries=5) # todo lower crazy timeout
+            self.reinit_process()
             self._column_family_op_options = column_family_op_options
             self._shouldLog = shouldLog
 
+    def reinit_process(self):
+        self._pool = ConnectionPool(self._keyspace, pool_size=5, pool_timeout=450, timeout=300, max_overflow=5, max_retries=5) # todo lower crazy timeout
+
     def _getColumnFamily(self, duration, table_type):
+        #logging.debug('_getColumnFamily (process %s)' % (os.getpid()))
         # todo: non-cryptic error message if it doesn't exist
         #return ColumnFamily(self._pool, self._columnFamilyName(duration, table_type), **self._column_family_op_options)
         return ColumnFamily(self._pool, self._columnFamilyName(duration, table_type), **self._column_family_op_options)
@@ -154,6 +162,7 @@ class CassandraTimeSeries(object):
                                                   'status': UTF8Type(), 
                                                   'external_id_domain': UTF8Type(), 
                                                   'external_id': UTF8Type(), 
+                                                  'external_time': UTF8Type(), 
                                                   'source': UTF8Type(),
                                                   'who': UTF8Type(),
                                                   'comment': UTF8Type()}
@@ -170,6 +179,7 @@ class CassandraTimeSeries(object):
                     systemManager.create_index(self._keyspace, columnFamilyName, 'status', UTF8Type())
                     systemManager.create_index(self._keyspace, columnFamilyName, 'external_id_domain', UTF8Type())
                     systemManager.create_index(self._keyspace, columnFamilyName, 'external_id', UTF8Type())
+                    systemManager.create_index(self._keyspace, columnFamilyName, 'external_time', UTF8Type())
                     systemManager.create_index(self._keyspace, columnFamilyName, 'who', UTF8Type())
                     systemManager.create_index(self._keyspace, columnFamilyName, 'comment', UTF8Type())
 
@@ -200,17 +210,17 @@ class CassandraTimeSeries(object):
         return (unicode(item), datetime2int(beginTime), datetime2int(endTime))
 
     # todo make __getitem__ with key as a tuple
-    def get_nodefault(self, item, fields, time, duration):
-                cf = self._getColumnFamily(duration, 'main')
+    def get_nodefault(self, item, fields, time, duration, table_type='main'):
+                cf = self._getColumnFamily(duration, table_type)
                 try:
                     return cf.get(self._makeKey(item, time), columns=fields)
                 except NotFoundException:
                     raise KeyError('CassandraTimeSeries: get_nodefault not found')
 
     # todo make this return the whole row, like get_nodefault does now
-    def get(self, item, field, time, duration, default=None):
+    def get(self, item, field, time, duration, default=None, table_type='main'):
         try:
-            return self.get_nodefault(item, [field], time, duration)[field]
+            return self.get_nodefault(item, [field], time, duration, table_type=table_type)[field]
         except KeyError:
             return default
     
@@ -234,7 +244,13 @@ class CassandraTimeSeries(object):
                 return [resultDict.get(key, {}).get(field, default) for key in keys]
         except KeyError:
             raise KeyError('CassandraTimeSeries.multiget: no entry exists for item %s at time %s' % (item, int2datetime(key[1])))
-                
+
+    def get_indexed(self, index_clause, duration, table_type='main', columns=None):
+        cf = self._getColumnFamily(duration, table_type)
+        return cf.get_indexed_slices(index_clause, columns=columns)
+        
+
+
 
     # todo: does not coerce return dates back to datetime; must change dependencies if u change this
     # todo: 'fields' is ignored
@@ -242,20 +258,36 @@ class CassandraTimeSeries(object):
         cf = self._getColumnFamily(duration, table_type)
         start = self._makeKey(item, beginTime)
         finish = list(self._makeKey(item, endTime))
-        finish.append(False)  # still doesn't exclude the endpoint for some reason, so do it manually
+        #finish.append(False)  # still doesn't exclude the endpoint for some reason, so do it manually
+        # see http://pycassa.github.io/pycassa/assorted/composite_types.html#inclusive-or-exclusive-slice-ends
         finish = tuple(finish)
         #print finish
+        #logging.debug('start, finish: %s, %s' % (start, finish))
         #print (start, finish, fields)
         results = cf.get_range(start=start, finish=finish, columns=fields)
+        results = [result for result in results if result[0][0] ==  item]
+        results = [result for result in results if result[0][1] >=  datetime2int(beginTime)]
         results = [result for result in results if result[0][1] <  datetime2int(endTime)]
         #print results
-        return (dict(time=int2datetime(x[0][1]), **x[1]) for x in results)
+        #return (x[1] for x in results)
+        #return (dict(time=int2datetime(x[0][1]), **x[1]) for x in results) # error when the row already had a 'time'
+        return (_updateAndReturn({'time':int2datetime(x[0][1])}, x[1]) for x in results)
+
+    # this doesn't work very well; it tries to load ALL rows matching 'item' into memory and then filter for beingTime-endTime in memory!
+    def selectTimeInterval2(self, item, fields, duration, beginTime, endTime, count=100000, table_type='main', **kw):
+        return self.get_indexed(pycassa.index.create_index_clause( [pycassa.index.create_index_expression('item', item), pycassa.index.create_index_expression('time', datetime2int(beginTime), pycassa.index.GTE), pycassa.index.create_index_expression('time', datetime2int(endTime), pycassa.index.LT)] , count=count), duration, table_type, columns=fields)
+        # requires the rows to already have a 'time' field
+        
+
 
     # todo this should be called 'insert', not 'append'
-    def append(self, item, field, duration, value, time = dtm.utcnow(), **kw):
+    def append(self, item, field, duration, value, time = dtm.utcnow(), table_type='main', external_time=None, **kw):
         #print 'trying to append'
-        cf = self._getColumnFamily(duration, 'main')
-        cf.insert(self._makeKey(item, time), {field : value})
+        cf = self._getColumnFamily(duration, table_type)
+        if external_time is not None:
+            cf.insert(self._makeKey(item, time), {field : value, 'external_time': external_time})
+        else:
+            cf.insert(self._makeKey(item, time), {field : value})
 
     # todo this should be called 'insert', not 'append'
     def appendRow(self, item, duration, table_type, row, time = dtm.utcnow()):
@@ -441,7 +473,7 @@ class CassandraTimeSeries(object):
 
         try:
             #return {'time' : time, 'value' : self.get_nodefault(item, fields, time, duration), }
-            return self.get_nodefault(item, fields, time, duration).update({'time' : time})
+            return self.get_nodefault(item, fields, time, duration, table_type=table_type).update({'time' : time}) # TODO addition of table_type untested
             
         except KeyError:
             lastBefore = self.lastEntryInTimeInterval(item, fields, duration, time - search_radius_duration, time, table_type=table_type)
@@ -461,7 +493,19 @@ class CassandraTimeSeries(object):
             else:
                 return lastBefore 
 
+
+####################
+# static helpers
+####################
+def _updateAndReturn(origDict, updateWithDict): 
+    origDict.update(updateWithDict)
+    return origDict
         
+
+
+####################
+# tests in comments
+####################
 
                 
 
